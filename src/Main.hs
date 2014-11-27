@@ -91,6 +91,13 @@ parseCommand c ((flip lookup unaryCommands -> Just p):arg:xs) = do
   parseCommand (f c) xs
 parseCommand _ _ = Left "unrecognized command"
 
+usage :: Text
+usage = "Usage: hhue <config | lights | groups | user <create [key] | delete <key>> | light <light id> [name <name> | pointsymbol <pointsymbol id> <symbol> | <COMMAND>*] | group <create <name> <light id>* | update <group id> <name> <light id>* | delete <group id> | <group id> <COMMAND>*>>\n\
+        \COMMAND := on | off | bri <0-255> | hue <0-65535> | sat <0-255> | ct <153-500> | alert <none|select|lselect> | effect <none|colorloop> | transitiontime <0-65535>\n\
+        \ct represents color temperature in mireds\n\
+        \transitiontime is in units of 100ms\n\
+        \Arbitrarily many commands may be specified simultaneously. When a command recurs, the rightmost instance dominates."
+
 main :: IO ()
 main = do
   args <- getArgs
@@ -141,7 +148,7 @@ main = do
       case parseCommand lightCommand (map T.pack command) of
         Left err -> hPutStrLn stderr $ "couldn't parse light command: " ++ err
         Right cmd -> BSL.hPut stdout =<< httpPut [key, "groups", T.pack number, "action"] (encode cmd)
-    _ -> hPutStrLn stderr "unrecognized command"
+    _ -> BS.hPut stderr . encodeUtf8 $ T.concat ["unrecognized command\n", usage, "\n"]
 
 httpReq :: [Text] -> ByteString -> RequestBody -> IO BSL.ByteString
 httpReq url method body = do
