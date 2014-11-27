@@ -2,12 +2,12 @@ module Main where
 
 import Data.Word
 import Data.Text.Encoding (encodeUtf8, decodeUtf8)
+import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as BS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Read as TR
-import Data.Aeson (encode, ToJSON, toJSON, object)
-import qualified Data.Aeson as Aeson
+import Data.Aeson
 import Data.Aeson.Types (Pair)
 import Data.Maybe
 import Data.List
@@ -15,7 +15,7 @@ import Data.Either
 
 import Control.Applicative
 import Control.Monad
-import Control.Lens
+import Control.Lens hiding ((.=))
 import Control.Lens.TH
 
 import System.Environment
@@ -51,14 +51,14 @@ instance ToJSON LightCommand where
       f :: ToJSON a => Text -> (Lens' LightCommand (Maybe a)) -> LightCommand -> Maybe Pair
       f name accessor cmd = case view accessor cmd of
                               Nothing -> Nothing
-                              Just val -> Just ((Aeson..=) name val)
+                              Just val -> Just (name .= val)
 
 lightCommand :: LightCommand
 lightCommand = LightCommand Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 nullaryCommands :: [(Text, LightCommand -> LightCommand)]
-nullaryCommands = [("on", set power (Just True))
-                  ,("off", set power (Just False))]
+nullaryCommands = [ ("on", set power (Just True))
+                  , ("off", set power (Just False))]
 
 unaryCommands :: [(Text, Text -> Either String (LightCommand -> LightCommand))]
 unaryCommands = [ ("bri", fmap (set brightness . Just . fst) . TR.decimal)
@@ -87,23 +87,32 @@ main :: IO ()
 main = do
   args <- getArgs
   case args of
+    [key, "lights"] -> BS.hPut stdout =<< get (T.pack key) ["lights"]
+    [key, "groups"] -> BS.hPut stdout =<< get (T.pack key) ["groups"]
+    [key, "light", number] -> BS.hPut stdout =<< get (T.pack key) ["lights", T.pack number]
+    [key, "light", number, "name", name] ->
+      BS.hPut stdout =<< put (T.pack key) ["lights", T.pack number] (encode (object ["name" .= T.pack name]))
     key:"light":number:command ->
-      case (TR.decimal (T.pack number), parseCommand lightCommand (map T.pack command)) of
-        (Left err, _) -> hPutStr stderr $ "couldn't parse light ID " ++ number
-        (_, Left err) -> hPutStr stderr $ "couldn't parse light command: " ++ err
-        (Right (num, _), Right cmd) -> commandLight (T.pack key) num cmd
-    _ -> hPutStr stderr "unrecognized command"
+      case parseCommand lightCommand (map T.pack command) of
+        Left err -> hPutStrLn stderr $ "couldn't parse light command: " ++ err
+        Right cmd -> BS.hPut stdout =<< put (T.pack key) ["lights", T.pack number, "state"] (encode cmd)
+    key:"group":number:command ->
+      case parseCommand lightCommand (map T.pack command) of
+        Left err -> hPutStrLn stderr $ "couldn't parse light command: " ++ err
+        Right cmd -> BS.hPut stdout =<< put (T.pack key) ["groups", T.pack number, "action"] (encode cmd)
+    _ -> hPutStrLn stderr "unrecognized command"
 
-commandLight :: Text -> Word8 -> LightCommand -> IO ()
-commandLight key number cmd = do
-  request <- parseUrl . T.unpack $ T.concat ["http://philips-hue/api/", key, "/lights/", T.pack . show $ number, "/state"]
-  BS.hPut stdout (encode cmd)
-  putStrLn ""
-  response <- withManager defaultManagerSettings $ \mgr ->
-    httpLbs (request { method = "PUT"
-                     , requestBody = RequestBodyLBS . encode $ cmd
-                     })
-            mgr
-  BS.hPut stdout $ responseBody response
-  putStrLn ""
-  pure ()
+get :: Text -> [Text] -> IO ByteString
+get key url = do
+  request <- parseUrl . T.unpack $ T.concat ["http://philips-hue/api/", key, "/", T.intercalate "/" url]
+  response <- withManager defaultManagerSettings $ \mgr -> httpLbs request mgr
+  pure . responseBody $ response
+
+put :: Text -> [Text] -> ByteString -> IO ByteString
+put key url body = do
+  request <- parseUrl . T.unpack $ T.concat ["http://philips-hue/api/", key, "/", T.intercalate "/" url]
+  response <- withManager defaultManagerSettings $ \mgr -> httpLbs (request { method = "PUT"
+                                                                            , requestBody = RequestBodyLBS body
+                                                                            })
+                                                                   mgr
+  pure . responseBody $ response
