@@ -3,13 +3,15 @@ module Main where
 import Data.Word
 import Data.Text.Encoding (encodeUtf8, decodeUtf8)
 import qualified Data.ByteString
-import Data.ByteString.Lazy (ByteString)
-import qualified Data.ByteString.Lazy as BS
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Read as TR
 import Data.Aeson
 import Data.Aeson.Types (Pair)
+import Data.Aeson.Lens
 import Data.Maybe
 import Data.List
 import Data.Either
@@ -21,6 +23,10 @@ import Control.Lens.TH
 
 import System.Environment
 import System.IO
+import System.IO.Error
+import System.Exit
+import System.Directory
+import System.FilePath
 
 import Network.HTTP.Client
 import Network.HostName
@@ -88,44 +94,56 @@ parseCommand _ _ = Left "unrecognized command"
 main :: IO ()
 main = do
   args <- getArgs
+  configDir <- (</> ".config/hhue") <$> getHomeDirectory
+  createDirectoryIfMissing True configDir
+  let keyFile = configDir </> "key"
+  key <- catchIOError (decodeUtf8 <$> BS.readFile keyFile) $ \err ->
+    case isDoesNotExistError err of
+      False -> ioError err
+      True -> do
+        result <- createUser Nothing
+        case result ^? nth 0 . key "error" . key "description" . _String of
+          Just reason -> do
+            hPutStr stderr "failed to create user: "
+            BS.hPut stderr (encodeUtf8 reason)
+            hPutStrLn stderr ""
+            exitFailure
+          Nothing ->
+            case result ^? nth 0 . key "success" . key "username" . _String of
+              Nothing -> hPutStrLn stderr "failed to parse user create result: " >> BSL.hPut stderr result >> exitFailure
+              Just freshKey -> BS.writeFile keyFile (encodeUtf8 freshKey) >> pure freshKey
   case args of
-    ["user", "create"] -> do
-      hostname <- getHostName
-      BS.hPut stdout =<< httpPost [] (encode (object [ "devicetype" .= T.concat ["hhue#", T.pack (take 19 hostname)]]))
-    ["user", "create", name] -> do
-      hostname <- getHostName
-      BS.hPut stdout =<< httpPost [] (encode (object [ "devicetype" .= T.concat ["hhue#", T.pack (take 19 hostname)]
-                                                 , "username" .= name
-                                                 ]))
-    ["user", key, "delete", user] -> BS.hPut stdout =<< httpDelete [T.pack key, "config", "whitelist", T.pack user]
-    ["config", key] -> BS.hPut stdout =<< httpGet [T.pack key, "config"]
-    ["lights", key] -> BS.hPut stdout =<< httpGet [T.pack key, "lights"]
-    ["light", key, number] -> BS.hPut stdout =<< httpGet [T.pack key, "lights", T.pack number]
-    ["light", key, number, "name", name] ->
-      BS.hPut stdout =<< httpPut [T.pack key, "lights", T.pack number] (encode (object ["name" .= T.pack name]))
-    ["light", key, number, "pointsymbol", symbolNumber, symbol] ->
-      BS.hPut stdout =<< httpPut [T.pack key, "lights", T.pack number, "pointsymbol"]
+    ["user", "create"] -> BSL.hPut stdout =<< createUser Nothing
+    ["user", "create", name] -> BSL.hPut stdout =<< createUser (Just . T.pack $ name)
+    ["user", "delete", user] -> BSL.hPut stdout =<< httpDelete [key, "config", "whitelist", T.pack user]
+    ["config"] -> BSL.hPut stdout =<< httpGet [key, "config"]
+    ["lights"] -> BSL.hPut stdout =<< httpGet [key, "lights"]
+    ["light", number] -> BSL.hPut stdout =<< httpGet [key, "lights", T.pack number]
+    ["light", number, "name", name] ->
+      BSL.hPut stdout =<< httpPut [key, "lights", T.pack number] (encode (object ["name" .= T.pack name]))
+    ["light", number, "pointsymbol", symbolNumber, symbol] ->
+      BSL.hPut stdout =<< httpPut [key, "lights", T.pack number, "pointsymbol"]
                              (encode (object [T.pack symbolNumber .= T.pack symbol]))
-    "light":key:number:command ->
+    "light":number:command ->
       case parseCommand lightCommand (map T.pack command) of
         Left err -> hPutStrLn stderr $ "couldn't parse light command: " ++ err
-        Right cmd -> BS.hPut stdout =<< httpPut [T.pack key, "lights", T.pack number, "state"] (encode cmd)
-    ["groups", key] -> BS.hPut stdout =<< httpGet [T.pack key, "groups"]
-    "group":key:"create":name:lights -> BS.hPut stdout =<< httpPost [T.pack key, "groups"]
+        Right cmd -> BSL.hPut stdout =<< httpPut [key, "lights", T.pack number, "state"] (encode cmd)
+    ["groups"] -> BSL.hPut stdout =<< httpGet [key, "groups"]
+    "group":"create":name:lights -> BSL.hPut stdout =<< httpPost [key, "groups"]
                                                                     (encode $ object [ "name" .= T.pack name
                                                                                      , "lights" .= map T.pack lights])
-    "group":key:"update":number:name:lights ->
-      BS.hPut stdout =<< httpPut [T.pack key, "groups", T.pack number]
+    "group":"update":number:name:lights ->
+      BSL.hPut stdout =<< httpPut [key, "groups", T.pack number]
                                  (encode $ object [ "name" .= T.pack name
                                                   , "lights" .= map T.pack lights])
-    ["group", key, "delete", number] -> BS.hPut stdout =<< httpDelete [T.pack key, "groups", T.pack number]
-    "group":key:number:command ->
+    ["group", "delete", number] -> BSL.hPut stdout =<< httpDelete [key, "groups", T.pack number]
+    "group":number:command ->
       case parseCommand lightCommand (map T.pack command) of
         Left err -> hPutStrLn stderr $ "couldn't parse light command: " ++ err
-        Right cmd -> BS.hPut stdout =<< httpPut [T.pack key, "groups", T.pack number, "action"] (encode cmd)
+        Right cmd -> BSL.hPut stdout =<< httpPut [key, "groups", T.pack number, "action"] (encode cmd)
     _ -> hPutStrLn stderr "unrecognized command"
 
-httpReq :: [Text] -> Data.ByteString.ByteString -> RequestBody -> IO ByteString
+httpReq :: [Text] -> ByteString -> RequestBody -> IO BSL.ByteString
 httpReq url method body = do
   request <- parseUrl . T.unpack . T.concat . intersperse "/" $ "http://philips-hue/api" : url
   response <- withManager defaultManagerSettings $ \mgr -> httpLbs (request { method = method
@@ -134,14 +152,24 @@ httpReq url method body = do
                                                                    mgr
   pure . responseBody $ response
 
-httpGet :: [Text] -> IO ByteString
+httpGet :: [Text] -> IO BSL.ByteString
 httpGet url = httpReq url "GET" (RequestBodyBS "")
 
-httpPut :: [Text] -> ByteString -> IO ByteString
+httpPut :: [Text] -> BSL.ByteString -> IO BSL.ByteString
 httpPut url body = httpReq url "PUT" (RequestBodyLBS body)
 
-httpPost :: [Text] -> ByteString -> IO ByteString
+httpPost :: [Text] -> BSL.ByteString -> IO BSL.ByteString
 httpPost url body = httpReq url "POST" (RequestBodyLBS body)
 
-httpDelete :: [Text] -> IO ByteString
+httpDelete :: [Text] -> IO BSL.ByteString
 httpDelete url = httpReq url "DELETE" (RequestBodyBS "")
+
+createUser :: Maybe Text -> IO BSL.ByteString
+createUser Nothing = do
+  hostname <- getHostName
+  httpPost [] (encode (object [ "devicetype" .= T.concat ["hhue#", T.pack (take 19 hostname)]]))
+createUser (Just name) = do
+  hostname <- getHostName
+  httpPost [] (encode (object [ "devicetype" .= T.concat ["hhue#", T.pack (take 19 hostname)]
+                             , "username" .= name
+                             ]))
