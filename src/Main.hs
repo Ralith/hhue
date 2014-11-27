@@ -2,6 +2,7 @@ module Main where
 
 import Data.Word
 import Data.Text.Encoding (encodeUtf8, decodeUtf8)
+import qualified Data.ByteString
 import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as BS
 import Data.Text (Text)
@@ -22,6 +23,7 @@ import System.Environment
 import System.IO
 
 import Network.HTTP.Client
+import Network.HostName
 
 data LightCommand = LightCommand { _power :: Maybe Bool
                                  , _brightness :: Maybe Word8
@@ -87,32 +89,59 @@ main :: IO ()
 main = do
   args <- getArgs
   case args of
-    [key, "lights"] -> BS.hPut stdout =<< get (T.pack key) ["lights"]
-    [key, "groups"] -> BS.hPut stdout =<< get (T.pack key) ["groups"]
-    [key, "light", number] -> BS.hPut stdout =<< get (T.pack key) ["lights", T.pack number]
-    [key, "light", number, "name", name] ->
-      BS.hPut stdout =<< put (T.pack key) ["lights", T.pack number] (encode (object ["name" .= T.pack name]))
-    key:"light":number:command ->
+    ["user", "create"] -> do
+      hostname <- getHostName
+      BS.hPut stdout =<< httpPost [] (encode (object [ "devicetype" .= T.concat ["hhue#", T.pack (take 19 hostname)]]))
+    ["user", "create", name] -> do
+      hostname <- getHostName
+      BS.hPut stdout =<< httpPost [] (encode (object [ "devicetype" .= T.concat ["hhue#", T.pack (take 19 hostname)]
+                                                 , "username" .= name
+                                                 ]))
+    ["user", key, "delete", user] -> BS.hPut stdout =<< httpDelete [T.pack key, "config", "whitelist", T.pack user]
+    ["config", key] -> BS.hPut stdout =<< httpGet [T.pack key, "config"]
+    ["lights", key] -> BS.hPut stdout =<< httpGet [T.pack key, "lights"]
+    ["light", key, number] -> BS.hPut stdout =<< httpGet [T.pack key, "lights", T.pack number]
+    ["light", key, number, "name", name] ->
+      BS.hPut stdout =<< httpPut [T.pack key, "lights", T.pack number] (encode (object ["name" .= T.pack name]))
+    ["light", key, number, "pointsymbol", symbolNumber, symbol] ->
+      BS.hPut stdout =<< httpPut [T.pack key, "lights", T.pack number, "pointsymbol"]
+                             (encode (object [T.pack symbolNumber .= T.pack symbol]))
+    "light":key:number:command ->
       case parseCommand lightCommand (map T.pack command) of
         Left err -> hPutStrLn stderr $ "couldn't parse light command: " ++ err
-        Right cmd -> BS.hPut stdout =<< put (T.pack key) ["lights", T.pack number, "state"] (encode cmd)
-    key:"group":number:command ->
+        Right cmd -> BS.hPut stdout =<< httpPut [T.pack key, "lights", T.pack number, "state"] (encode cmd)
+    ["groups", key] -> BS.hPut stdout =<< httpGet [T.pack key, "groups"]
+    "group":key:"create":name:lights -> BS.hPut stdout =<< httpPost [T.pack key, "groups"]
+                                                                    (encode $ object [ "name" .= T.pack name
+                                                                                     , "lights" .= map T.pack lights])
+    "group":key:"update":number:name:lights ->
+      BS.hPut stdout =<< httpPut [T.pack key, "groups", T.pack number]
+                                 (encode $ object [ "name" .= T.pack name
+                                                  , "lights" .= map T.pack lights])
+    ["group", key, "delete", number] -> BS.hPut stdout =<< httpDelete [T.pack key, "groups", T.pack number]
+    "group":key:number:command ->
       case parseCommand lightCommand (map T.pack command) of
         Left err -> hPutStrLn stderr $ "couldn't parse light command: " ++ err
-        Right cmd -> BS.hPut stdout =<< put (T.pack key) ["groups", T.pack number, "action"] (encode cmd)
+        Right cmd -> BS.hPut stdout =<< httpPut [T.pack key, "groups", T.pack number, "action"] (encode cmd)
     _ -> hPutStrLn stderr "unrecognized command"
 
-get :: Text -> [Text] -> IO ByteString
-get key url = do
-  request <- parseUrl . T.unpack $ T.concat ["http://philips-hue/api/", key, "/", T.intercalate "/" url]
-  response <- withManager defaultManagerSettings $ \mgr -> httpLbs request mgr
-  pure . responseBody $ response
-
-put :: Text -> [Text] -> ByteString -> IO ByteString
-put key url body = do
-  request <- parseUrl . T.unpack $ T.concat ["http://philips-hue/api/", key, "/", T.intercalate "/" url]
-  response <- withManager defaultManagerSettings $ \mgr -> httpLbs (request { method = "PUT"
-                                                                            , requestBody = RequestBodyLBS body
+httpReq :: [Text] -> Data.ByteString.ByteString -> RequestBody -> IO ByteString
+httpReq url method body = do
+  request <- parseUrl . T.unpack . T.concat . intersperse "/" $ "http://philips-hue/api" : url
+  response <- withManager defaultManagerSettings $ \mgr -> httpLbs (request { method = method
+                                                                            , requestBody = body
                                                                             })
                                                                    mgr
   pure . responseBody $ response
+
+httpGet :: [Text] -> IO ByteString
+httpGet url = httpReq url "GET" (RequestBodyBS "")
+
+httpPut :: [Text] -> ByteString -> IO ByteString
+httpPut url body = httpReq url "PUT" (RequestBodyLBS body)
+
+httpPost :: [Text] -> ByteString -> IO ByteString
+httpPost url body = httpReq url "POST" (RequestBodyLBS body)
+
+httpDelete :: [Text] -> IO ByteString
+httpDelete url = httpReq url "DELETE" (RequestBodyBS "")
