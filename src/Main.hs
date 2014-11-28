@@ -68,22 +68,35 @@ nullaryCommands :: [(Text, LightCommand -> LightCommand)]
 nullaryCommands = [ ("on", set power (Just True))
                   , ("off", set power (Just False))]
 
-unaryCommands :: [(Text, Text -> Either String (LightCommand -> LightCommand))]
-unaryCommands = [ ("bri", fmap (set brightness . Just . fst) . TR.decimal)
-                , ("hue", fmap (set hue . Just . fst) . TR.decimal)
-                , ("sat", fmap (set saturation . Just . fst) . TR.decimal)
-                , ("ct", fmap (set colorTemp . Just . fst) . TR.decimal)
+decimal :: Integral a => Text -> Either Text a
+decimal t = case TR.decimal t of
+              Left err -> Left (T.pack err)
+              Right (val, "") -> Right val
+              Right (_, ts) -> Left . T.concat $ ["contains garbage: ", ts]
+
+unaryCommands :: [(Text, Text -> Either Text (LightCommand -> LightCommand))]
+unaryCommands = [ ("bri", fmap (set brightness . Just) . intRange 0 255)
+                , ("hue", fmap (set hue . Just) . intRange 0 65535)
+                , ("sat", fmap (set saturation . Just) . intRange 0 255)
+                , ("ct", fmap (set colorTemp . Just) . intRange 153 500)
                 , ("alert", fmap (set alert . Just) . limit ["none", "select", "lselect"])
                 , ("effect", fmap (set effect . Just) . limit ["none", "colorloop"])
-                , ("time", fmap (set transitionTime . Just . fst) . TR.decimal)
+                , ("time", fmap (set transitionTime . Just) . decimal)
                 ]
   where
-    limit :: [Text] -> Text -> Either String Text
+    intRange :: (Integral a, Show a) => Integer -> Integer -> Text -> Either Text a
+    intRange min max t =
+      do x <- decimal t
+         if min <= x && x <= max
+            then Right (fromInteger x)
+            else Left $ T.concat ["value ", t, " out of legal range ", T.pack . show $ min, "-", T.pack . show $ max]
+
+    limit :: [Text] -> Text -> Either Text Text
     limit options input
       | elem input options = Right input
-      | otherwise = Left $ "illegal input \"" ++ T.unpack input ++ "\", expected one of: " ++ intercalate ", " (map T.unpack options)
+      | otherwise = Left . T.concat $ "illegal input \"":input:"\", expected one of: ":intersperse ", " options
 
-parseCommand :: LightCommand -> [Text] -> Either String LightCommand
+parseCommand :: LightCommand -> [Text] -> Either Text LightCommand
 parseCommand c [] = Right c
 parseCommand c ((flip lookup nullaryCommands -> Just f):xs) = parseCommand (f c) xs
 parseCommand c ((flip lookup unaryCommands -> Just p):arg:xs) = do
@@ -133,7 +146,7 @@ main = do
                              (encode (object [T.pack symbolNumber .= T.pack symbol]))
     "light":number:command ->
       case parseCommand lightCommand (map T.pack command) of
-        Left err -> hPutStrLn stderr $ "couldn't parse light command: " ++ err
+        Left err -> BS.hPut stderr (encodeUtf8 (T.concat ["couldn't parse light command: ", err])) >> hPutStrLn stderr ""
         Right cmd -> BSL.hPut stdout =<< httpPut [key, "lights", T.pack number, "state"] (encode cmd)
     ["groups"] -> BSL.hPut stdout =<< httpGet [key, "groups"]
     "group":"create":name:lights -> BSL.hPut stdout =<< httpPost [key, "groups"]
@@ -146,7 +159,7 @@ main = do
     ["group", "delete", number] -> BSL.hPut stdout =<< httpDelete [key, "groups", T.pack number]
     "group":number:command ->
       case parseCommand lightCommand (map T.pack command) of
-        Left err -> hPutStrLn stderr $ "couldn't parse light command: " ++ err
+        Left err -> BS.hPut stderr (encodeUtf8 (T.concat ["couldn't parse light command: ", err])) >> hPutStrLn stderr ""
         Right cmd -> BSL.hPut stdout =<< httpPut [key, "groups", T.pack number, "action"] (encode cmd)
     _ -> BS.hPut stderr . encodeUtf8 $ T.concat ["unrecognized command\n", usage, "\n"]
 
