@@ -81,7 +81,7 @@ unaryCommands = [ ("bri", fmap (set brightness . Just) . intRange 0 255)
                 , ("ct", fmap (set colorTemp . Just) . intRange 153 500)
                 , ("alert", fmap (set alert . Just) . limit ["none", "select", "lselect"])
                 , ("effect", fmap (set effect . Just) . limit ["none", "colorloop"])
-                , ("time", fmap (set transitionTime . Just) . decimal)
+                , ("time", fmap (set transitionTime . Just) . intRange 0 65535)
                 ]
   where
     intRange :: (Integral a, Show a) => Integer -> Integer -> Text -> Either Text a
@@ -105,7 +105,7 @@ parseCommand c ((flip lookup unaryCommands -> Just p):arg:xs) = do
 parseCommand _ _ = Left "unrecognized command"
 
 usage :: Text
-usage = "Usage: hhue <config | lights | groups | user <create [key] | delete <key>> | light <light id> [name <name> | pointsymbol <pointsymbol id> <symbol> | <COMMAND>*] | group <create <name> <light id>* | update <group id> <name> <light id>* | delete <group id> | <group id> <COMMAND>*>>\n\
+usage = "Usage: hhue <config | lights | groups | scenes | user <create [key] | delete <key>> | light <light id> [name <name> | pointsymbol <pointsymbol id> <symbol> | <COMMAND>*] | group <create <name> <light id>* | update <group id> <name> <light id>* | delete <group id> | <group id> <scene <scene id> | symbol <symbolselection> <duration> | <COMMAND>*>> | scene <create <scene id> <name> <light id>* | update <scene id> <light id> <COMMAND>*>>\n\
         \COMMAND := on | off | bri <0-255> | hue <0-65535> | sat <0-255> | ct <153-500> | alert <none|select|lselect> | effect <none|colorloop> | transitiontime <0-65535>\n\
         \ct represents color temperature in mireds\n\
         \transitiontime is in units of 100ms\n\
@@ -150,17 +150,34 @@ main = do
         Right cmd -> BSL.hPut stdout =<< httpPut [key, "lights", T.pack number, "state"] (encode cmd)
     ["groups"] -> BSL.hPut stdout =<< httpGet [key, "groups"]
     "group":"create":name:lights -> BSL.hPut stdout =<< httpPost [key, "groups"]
-                                                                    (encode $ object [ "name" .= T.pack name
-                                                                                     , "lights" .= map T.pack lights])
+                                                                 (encode $ object [ "name" .= T.pack name
+                                                                                  , "lights" .= map T.pack lights])
     "group":"update":number:name:lights ->
       BSL.hPut stdout =<< httpPut [key, "groups", T.pack number]
                                  (encode $ object [ "name" .= T.pack name
                                                   , "lights" .= map T.pack lights])
     ["group", "delete", number] -> BSL.hPut stdout =<< httpDelete [key, "groups", T.pack number]
+    ["group", groupID, "scene", sceneID] -> BSL.hPut stdout =<< httpPut [key, "groups", T.pack groupID, "action"]
+                                                                        (encode $ object [ "scene" .= T.pack sceneID])
+    ["group", groupID, "symbol", selection, duration] ->
+      case decimal (T.pack duration) of
+        Left err -> BS.hPut stderr (encodeUtf8 (T.concat ["couldn't parse duration: ", err])) >> hPutStrLn stderr ""
+        Right d -> BSL.hPut stdout =<< httpPut [key, "groups", T.pack groupID, "transmitsymbol"]
+                                               (encode $ object [ "symbolselection" .= selection, "duration" .= (d :: Word16)])
     "group":number:command ->
       case parseCommand lightCommand (map T.pack command) of
         Left err -> BS.hPut stderr (encodeUtf8 (T.concat ["couldn't parse light command: ", err])) >> hPutStrLn stderr ""
         Right cmd -> BSL.hPut stdout =<< httpPut [key, "groups", T.pack number, "action"] (encode cmd)
+    ["scenes"] -> BSL.hPut stdout =<< httpGet [key, "scenes"]
+    "scene":"create":sceneID:name:lights -> BSL.hPut stdout =<< httpPut [key, "scenes", T.pack sceneID]
+                                                                        (encode $ object [ "name" .= T.pack name
+                                                                                         , "lights" .= map T.pack lights])
+    "scene":"update":sceneID:lightNumber:command ->
+      case parseCommand lightCommand (map T.pack command) of
+        Left err -> BS.hPut stderr (encodeUtf8 (T.concat ["couldn't parse light command: ", err])) >> hPutStrLn stderr ""
+        Right cmd -> BSL.hPut stdout =<< httpPut [key, "scenes", T.pack sceneID, "lights", T.pack lightNumber, "state"]
+                                                 (encode cmd)
+    ["schedules"] -> BSL.hPut stdout =<< httpGet [key, "schedules"]
     _ -> BS.hPut stderr . encodeUtf8 $ T.concat ["unrecognized command\n", usage, "\n"]
 
 httpReq :: [Text] -> ByteString -> RequestBody -> IO BSL.ByteString
@@ -191,5 +208,5 @@ createUser Nothing = do
 createUser (Just name) = do
   hostname <- getHostName
   httpPost [] (encode (object [ "devicetype" .= T.concat ["hhue#", T.pack (take 19 hostname)]
-                             , "username" .= name
-                             ]))
+                              , "username" .= name
+                              ]))
